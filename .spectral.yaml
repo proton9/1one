@@ -1,0 +1,17 @@
+extends:
+  - spectral:oas
+
+rules:
+  # OpenAPI core ruleset is a strong default. A couple of overrides for
+  # this project's style:
+
+  # We use shared response components sparingly; allow inline operation tags.
+  operation-tag-defined: warn
+
+  # Encourage richer descriptions but don't fail the build on them initially.
+  operation-description: warn
+  info-contact: off
+  info-license: off
+
+  # The spec is generated; some consistency rules are not actionable here.
+  oas3-unused-component: warn

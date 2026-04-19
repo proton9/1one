@@ -1,0 +1,105 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      APP_DEBUG: ${APP_DEBUG:-1}
+      APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
+      DATABASE_URL: "mysql://${MYSQL_USER:?MYSQL_USER is required}:${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}@mysql:3306/${MYSQL_DATABASE:-gateway}?serverVersion=8.0.45"
+      REDIS_DSN: "redis://redis:6379"
+      MESSENGER_TRANSPORT_DSN: "redis://redis:6379/messages"
+      PROVIDER_BASE_URL: "http://mock-provider:8001"
+      PROVIDER_MAC_ID: ${PROVIDER_MAC_ID:-gateway-app}
+      PROVIDER_MAC_KEY: ${PROVIDER_MAC_KEY:?PROVIDER_MAC_KEY is required}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        php bin/console doctrine:migrations:migrate --no-interaction &&
+        php bin/console doctrine:fixtures:load --no-interaction --append &&
+        php -S 0.0.0.0:8000 -t public /app/public/router.php
+      "
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    command: php bin/console messenger:consume async --time-limit=3600
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      APP_DEBUG: ${APP_DEBUG:-1}
+      APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
+      DATABASE_URL: "mysql://${MYSQL_USER:?MYSQL_USER is required}:${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}@mysql:3306/${MYSQL_DATABASE:-gateway}?serverVersion=8.0.45"
+      REDIS_DSN: "redis://redis:6379"
+      MESSENGER_TRANSPORT_DSN: "redis://redis:6379/messages"
+      PROVIDER_BASE_URL: "http://mock-provider:8001"
+      PROVIDER_MAC_ID: ${PROVIDER_MAC_ID:-gateway-app}
+      PROVIDER_MAC_KEY: ${PROVIDER_MAC_KEY:?PROVIDER_MAC_KEY is required}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+  mock-provider:
+    build:
+      context: .
+      dockerfile: mock-provider/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      PROVIDER_MAC_KEY: ${PROVIDER_MAC_KEY:?PROVIDER_MAC_KEY is required}
+
+  mock-merchant:
+    build:
+      context: .
+      dockerfile: mock-merchant/Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
+
+  # NOTE: MySQL runs in Compose for local dev convenience only.
+  # For production, run MySQL outside this stack — use a managed service
+  # (RDS, Cloud SQL, etc.) or a dedicated DB host with backups and HA.
+  # Stateful workloads in single-host Compose risk data loss from volume
+  # corruption, accidental `docker compose down -v`, or host failure.
+  mysql:
+    image: mysql:8.0
+    environment:
+      # MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-gateway}
+      MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+# The mysql_data volume persists across container rebuilds and `docker compose down`.
+# It is ONLY destroyed by `docker compose down -v` or explicit `docker volume rm`.
+# This is your only copy of the DB in dev — do not rely on it for anything important.
+volumes:
+  mysql_data:

@@ -1,0 +1,189 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: gateway_test
+          MYSQL_USER: app
+          MYSQL_PASSWORD: app
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    env:
+      APP_ENV: test
+      APP_SECRET: ci-test-secret
+      DATABASE_URL: "mysql://app:app@127.0.0.1:3306/gateway_test?serverVersion=8.0.45"
+      REDIS_DSN: "redis://127.0.0.1:6379"
+      MESSENGER_TRANSPORT_DSN: "in-memory://"
+      PROVIDER_BASE_URL: "http://localhost:8001"
+      PROVIDER_MAC_ID: "gateway-app"
+      PROVIDER_MAC_KEY: "ci-mac-key"
+      WEBHOOK_SECRET: "ci-webhook-secret"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, redis, intl, zip, bcmath
+          coverage: none
+          tools: composer:v2
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: gateway/vendor
+          key: ${{ runner.os }}-composer-${{ hashFiles('gateway/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Lint PHP files
+        run: composer lint
+
+      - name: Check code style
+        run: composer cs-check
+
+      - name: Run PHPStan
+        run: composer phpstan
+
+      - name: Wait for MySQL
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 --silent; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Run migrations
+        run: php bin/console doctrine:migrations:migrate --no-interaction --env=test
+
+      - name: Run tests
+        run: php bin/phpunit
+
+      - name: Check for dependency vulnerabilities
+        run: composer audit || true
+
+  spec-quality:
+    name: OpenAPI spec quality (Spectral + Schemathesis)
+    runs-on: ubuntu-latest
+    needs: ci
+    defaults:
+      run:
+        working-directory: gateway
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: gateway_test
+          MYSQL_USER: app
+          MYSQL_PASSWORD: app
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    env:
+      APP_ENV: test
+      APP_SECRET: ci-test-secret
+      DATABASE_URL: "mysql://app:app@127.0.0.1:3306/gateway_test?serverVersion=8.0.45"
+      REDIS_DSN: "redis://127.0.0.1:6379"
+      MESSENGER_TRANSPORT_DSN: "in-memory://"
+      PROVIDER_BASE_URL: "http://localhost:8001"
+      PROVIDER_MAC_ID: "gateway-app"
+      PROVIDER_MAC_KEY: "ci-mac-key"
+      WEBHOOK_SECRET: "ci-webhook-secret"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, redis, intl, zip, bcmath
+          coverage: none
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PHP dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Install Spectral
+        run: npm install -g @stoplight/spectral-cli@6
+
+      - name: Install Schemathesis
+        run: pip install --no-cache-dir 'schemathesis<4'
+
+      - name: Run migrations
+        run: php bin/console doctrine:migrations:migrate --no-interaction --env=test
+
+      - name: Boot gateway
+        run: |
+          php -S 127.0.0.1:8000 -t public > /tmp/gateway.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fs http://127.0.0.1:8000/api/doc.json > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "Gateway failed to boot:"; cat /tmp/gateway.log; exit 1
+
+      - name: Fetch OpenAPI spec
+        run: curl -fsS http://127.0.0.1:8000/api/doc.json -o /tmp/openapi.json
+
+      - name: Spectral lint
+        run: spectral lint --ruleset ../.spectral.yaml /tmp/openapi.json
+
+      - name: Schemathesis contract tests
+        run: schemathesis run --checks=all --hypothesis-max-examples=20 http://127.0.0.1:8000/api/doc.json

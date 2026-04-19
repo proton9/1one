@@ -1,0 +1,13 @@
+# Shared build context (used by mock-provider and mock-merchant Dockerfiles).
+.git/
+.github/
+docs/
+gateway/vendor/
+gateway/var/
+gateway/.env.local
+gateway/.env.*.local
+gateway/.phpunit.result.cache
+gateway/.php-cs-fixer.cache
+.env
+.env.local
+skeletonstructure.md

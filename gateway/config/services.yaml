@@ -1,0 +1,53 @@
+parameters:
+    provider_base_url: '%env(PROVIDER_BASE_URL)%'
+    provider_mac_id: '%env(PROVIDER_MAC_ID)%'
+    provider_mac_key: '%env(PROVIDER_MAC_KEY)%'
+    webhook_secret: '%env(WEBHOOK_SECRET)%'
+    redis_dsn: '%env(REDIS_DSN)%'
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Domain/'
+            - '../src/Kernel.php'
+
+    # Doctrine repositories live under src/Domain/ alongside the entities they
+    # query. The exclude above keeps entities out of the container, but
+    # repositories must be services so handlers/services can autowire them.
+    App\Domain\Transfer\TransferRepository: ~
+    App\Domain\Account\AccountRepository: ~
+
+    App\Infrastructure\Provider\MockProviderClient:
+        arguments:
+            $baseUrl: '%provider_base_url%'
+            $macId: '%provider_mac_id%'
+            $macKey: '%provider_mac_key%'
+
+    App\Infrastructure\Provider\ProviderClientInterface:
+        alias: App\Infrastructure\Provider\MockProviderClient
+
+    App\Infrastructure\Webhook\WebhookDispatcher:
+        arguments:
+            $secret: '%webhook_secret%'
+
+    App\Infrastructure\RedisAdapterInterface:
+        alias: App\Infrastructure\RedisAdapter
+
+    App\Infrastructure\RedisAdapter:
+        arguments:
+            $dsn: '%redis_dsn%'
+
+    App\EventListener\CorrelationIdListener:
+        tags:
+            - { name: monolog.processor }
+
+    App\ApiDoc\VersionDescriber:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+        tags:
+            - { name: nelmio_api_doc.describer, priority: -100 }

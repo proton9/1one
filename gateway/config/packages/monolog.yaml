@@ -1,0 +1,26 @@
+monolog:
+    handlers:
+        main:
+            type: stream
+            path: 'php://stderr'
+            level: info
+            # Mute the noisy `php` channel — that's where the error handler
+            # routes E_USER_DEPRECATED. Most of those come from third-party
+            # libraries (doctrine/migrations LazySchema, DBAL internals) that
+            # we cannot fix in our code. Application errors still flow through
+            # the `request` and other channels.
+            channels: ['!event', '!php']
+            formatter: monolog.formatter.json
+
+        # Keep deprecations visible at debug level only, so they're available
+        # when explicitly grep'ing for them but don't drown normal output.
+        deprecations:
+            type: stream
+            path: 'php://stderr'
+            level: debug
+            channels: ['php']
+            formatter: monolog.formatter.json
+
+services:
+    monolog.formatter.json:
+        class: Monolog\Formatter\JsonFormatter

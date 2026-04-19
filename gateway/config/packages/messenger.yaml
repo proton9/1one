@@ -1,0 +1,22 @@
+framework:
+    messenger:
+        failure_transport: failed
+
+        transports:
+            async:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                retry_strategy:
+                    max_retries: 5
+                    delay: 1000
+                    multiplier: 3
+                    max_delay: 300000
+
+            # Dead-letter: messages that exhaust their retry budget land here instead
+            # of being dropped. Inspect with `messenger:failed:show`, replay with
+            # `messenger:failed:retry`, remove with `messenger:failed:remove`.
+            failed:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%-failed'
+
+        routing:
+            'App\Messenger\Message\ProcessTransferMessage': async
+            'App\Messenger\Message\DispatchWebhookMessage': async

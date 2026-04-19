@@ -1,0 +1,19 @@
+nelmio_api_doc:
+    documentation:
+        info:
+            title: 'Payment Transfer Gateway'
+            description: 'Async payment transfer API. Idempotent POST /transfers, balance and status endpoints.'
+            version: '0.0.0'  # overridden at runtime by App\ApiDoc\VersionDescriber
+        components:
+            securitySchemes:
+                IdempotencyKey:
+                    type: apiKey
+                    in: header
+                    name: X-Idempotency-Key
+                    description: 'Optional idempotency key for POST /transfers. Repeated requests with the same key return the original response.'
+    areas:
+        default:
+            path_patterns:
+                - ^/transfers
+                - ^/accounts
+            host_patterns: []
