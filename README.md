@@ -90,6 +90,32 @@ curl http://localhost:8000/accounts/1/balance
 }
 ```
 
+## API Documentation
+
+Live OpenAPI 3 spec is generated from controller attributes by [NelmioApiDocBundle](https://github.com/nelmio/NelmioApiDocBundle):
+
+- `GET /api/doc` — Redoc HTML UI
+- `GET /api/doc.json` — raw OpenAPI JSON (consumed by Spectral + Schemathesis in CI)
+
+### Adding a New Route to the Docs
+
+For a new endpoint to appear in the generated spec:
+
+1. **Match an allowed path prefix.** Only routes matching `path_patterns` in [`gateway/config/packages/nelmio_api_doc.yaml`](gateway/config/packages/nelmio_api_doc.yaml) are documented. Currently `^/transfers` and `^/accounts`. If you add a new route family (e.g. `/refunds`), add its prefix to that list — otherwise it will silently not appear.
+2. **Use the `#[Route]` attribute** on the controller method (not YAML) so the bundle can discover it.
+3. **Annotate with OpenAPI attributes** from `OpenApi\Attributes as OA`:
+   - `#[OA\Tag(name: '…')]` groups endpoints in the UI
+   - `#[OA\RequestBody(...)]` with `new Model(type: YourDto::class)` reuses the DTO schema
+   - `#[OA\Parameter(...)]` for path / query / header params
+   - `#[OA\Response(response: <code>, ...)]` for each status code the endpoint can return — include all error codes, since Spectral lints for completeness
+4. **Regenerate and skim the diff:**
+   ```bash
+   curl -s http://localhost:8000/api/doc.json | jq . | less
+   ```
+5. **Before committing,** run the test suite — `spec-quality` in CI (Spectral + Schemathesis against `/api/doc.json`) gates on the same spec, so catching problems locally is faster than waiting on CI.
+
+See [`gateway/src/Controller/TransferController.php`](gateway/src/Controller/TransferController.php) for a complete example of attribute usage on all three endpoints.
+
 ## Architecture
 
 ```
