@@ -169,6 +169,18 @@ docker compose exec gateway php bin/console doctrine:migrations:migrate --env=te
 docker compose exec gateway php bin/phpunit
 ```
 
+### Test Coverage
+
+Measured with pcov against the full suite (unit + integration):
+
+| Metric  | Coverage                 |
+|---------|--------------------------|
+| Lines   | **96.23%** (332 / 345)   |
+| Methods | **90.32%** (84 / 93)     |
+| Classes | **76.92%** (20 / 26)     |
+
+164 tests, 337 assertions, all passing across 20 test files. See [`docs/test-inventory.md`](docs/test-inventory.md) for the per-class test breakdown.
+
 ## Project Structure
 
 ```
