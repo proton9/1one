@@ -9,7 +9,9 @@ use App\Domain\Account\AccountRepository;
 use App\Domain\Transfer\Transfer;
 use App\Domain\Transfer\TransferRepository;
 use App\Domain\Transfer\TransferStatus;
+use App\Exception\IdempotencyPayloadMismatchException;
 use App\Messenger\Message\ProcessTransferMessage;
+use App\Service\IdempotencyRecord;
 use App\Service\IdempotencyService;
 use App\Service\TransferService;
 use Doctrine\ORM\EntityManagerInterface;
@@ -58,6 +60,11 @@ class TransferServiceTest extends TestCase
         $ref->setValue($account, $id);
 
         return $account;
+    }
+
+    private function fingerprintFor(int $src, int $dest, int $amount, ?string $callbackUrl): string
+    {
+        return hash('sha256', $src . '|' . $dest . '|' . $amount . '|' . ($callbackUrl ?? ''));
     }
 
     // --- Happy path ---
@@ -127,7 +134,9 @@ class TransferServiceTest extends TestCase
         );
 
         $idempotency = $this->createMock(IdempotencyService::class);
-        $idempotency->method('check')->with('existing-key')->willReturn('some-transfer-id');
+        $idempotency->method('check')
+            ->with('existing-key')
+            ->willReturn(new IdempotencyRecord('some-transfer-id', $this->fingerprintFor(1, 2, 500, null)));
         $idempotency->expects($this->never())->method('reserve');
 
         $transferRepository = $this->createStub(TransferRepository::class);
@@ -151,7 +160,8 @@ class TransferServiceTest extends TestCase
     public function testIdempotencyKeyHitButTransferDeletedFallsThroughToReserve(): void
     {
         $idempotency = $this->createMock(IdempotencyService::class);
-        $idempotency->method('check')->willReturn('deleted-transfer-id');
+        $idempotency->method('check')
+            ->willReturn(new IdempotencyRecord('deleted-transfer-id', $this->fingerprintFor(1, 2, 500, null)));
         $idempotency->expects($this->once())->method('reserve')->willReturn(true);
 
         $transferRepository = $this->createStub(TransferRepository::class);
@@ -218,7 +228,7 @@ class TransferServiceTest extends TestCase
         $idempotency->method('check')->willReturn(null);
         $idempotency->expects($this->once())
             ->method('reserve')
-            ->with('my-key', $this->isString())
+            ->with('my-key', $this->isString(), $this->isString())
             ->willReturnCallback(function () use (&$reserveCalled) {
                 $reserveCalled = true;
 
@@ -255,7 +265,10 @@ class TransferServiceTest extends TestCase
         );
 
         $idempotency = $this->createStub(IdempotencyService::class);
-        $idempotency->method('check')->willReturnOnConsecutiveCalls(null, 'winner-id');
+        $idempotency->method('check')->willReturnOnConsecutiveCalls(
+            null,
+            new IdempotencyRecord('winner-id', $this->fingerprintFor(1, 2, 500, null)),
+        );
         $idempotency->method('reserve')->willReturn(false);
 
         $transferRepository = $this->createStub(TransferRepository::class);
@@ -314,6 +327,122 @@ class TransferServiceTest extends TestCase
 
         $this->expectException(\RuntimeException::class);
         $service->createTransfer(1, 2, 500, null, 'my-key');
+    }
+
+    // --- Idempotency: payload fingerprinting ---
+
+    public function testIdenticalPayloadHitReturnsExistingTransferAndDoesNotThrow(): void
+    {
+        $existingTransfer = new Transfer(
+            $this->makeAccountWithId(1, 'A', 1000),
+            $this->makeAccountWithId(2, 'B', 1000),
+            500,
+        );
+
+        $idempotency = $this->createStub(IdempotencyService::class);
+        $idempotency->method('check')->willReturn(
+            new IdempotencyRecord('existing-id', $this->fingerprintFor(1, 2, 500, null)),
+        );
+
+        $transferRepository = $this->createStub(TransferRepository::class);
+        $transferRepository->method('find')->willReturn($existingTransfer);
+
+        $service = $this->makeService(
+            transferRepository: $transferRepository,
+            idempotency: $idempotency,
+        );
+
+        $this->assertSame(
+            $existingTransfer,
+            $service->createTransfer(1, 2, 500, null, 'identical-key'),
+        );
+    }
+
+    public function testDifferentAmountWithSameKeyThrowsPayloadMismatch(): void
+    {
+        $idempotency = $this->createStub(IdempotencyService::class);
+        $idempotency->method('check')->willReturn(
+            new IdempotencyRecord('existing-id', $this->fingerprintFor(1, 2, 500, null)),
+        );
+
+        $em = $this->createMock(EntityManagerInterface::class);
+        $em->expects($this->never())->method('beginTransaction');
+
+        $this->expectException(IdempotencyPayloadMismatchException::class);
+
+        $this->makeService(em: $em, idempotency: $idempotency)
+            ->createTransfer(1, 2, 999, null, 'reused-key');
+    }
+
+    public function testDifferentDestAccountWithSameKeyThrowsPayloadMismatch(): void
+    {
+        $idempotency = $this->createStub(IdempotencyService::class);
+        $idempotency->method('check')->willReturn(
+            new IdempotencyRecord('existing-id', $this->fingerprintFor(1, 2, 500, null)),
+        );
+
+        $this->expectException(IdempotencyPayloadMismatchException::class);
+
+        $this->makeService(idempotency: $idempotency)
+            ->createTransfer(1, 99, 500, null, 'reused-key');
+    }
+
+    public function testDifferentCallbackUrlWithSameKeyThrowsPayloadMismatch(): void
+    {
+        $idempotency = $this->createStub(IdempotencyService::class);
+        $idempotency->method('check')->willReturn(
+            new IdempotencyRecord('existing-id', $this->fingerprintFor(1, 2, 500, null)),
+        );
+
+        $this->expectException(IdempotencyPayloadMismatchException::class);
+
+        $this->makeService(idempotency: $idempotency)
+            ->createTransfer(1, 2, 500, 'http://other.example/webhook', 'reused-key');
+    }
+
+    public function testNullFingerprintLegacyRecordSkipsComparison(): void
+    {
+        // Pre-fingerprinting Redis values surface as IdempotencyRecord(id, null).
+        // Behavior must match the old "always return original" semantics for those
+        // entries; new mismatched payloads do NOT throw. Within 24h the TTL clears them.
+        $existingTransfer = new Transfer(
+            $this->makeAccountWithId(1, 'A', 1000),
+            $this->makeAccountWithId(2, 'B', 1000),
+            100,
+        );
+
+        $idempotency = $this->createStub(IdempotencyService::class);
+        $idempotency->method('check')->willReturn(new IdempotencyRecord('legacy-id', null));
+
+        $transferRepository = $this->createStub(TransferRepository::class);
+        $transferRepository->method('find')->willReturn($existingTransfer);
+
+        $service = $this->makeService(
+            transferRepository: $transferRepository,
+            idempotency: $idempotency,
+        );
+
+        $this->assertSame(
+            $existingTransfer,
+            $service->createTransfer(1, 2, 999, null, 'legacy-key'),
+        );
+    }
+
+    public function testReservationLoserWithMismatchedPayloadThrowsPayloadMismatch(): void
+    {
+        // Race: another caller already holds the key. We re-check after losing
+        // the SET NX EX and find the stored fingerprint disagrees with ours.
+        $idempotency = $this->createStub(IdempotencyService::class);
+        $idempotency->method('check')->willReturnOnConsecutiveCalls(
+            null,
+            new IdempotencyRecord('winner-id', $this->fingerprintFor(1, 2, 500, null)),
+        );
+        $idempotency->method('reserve')->willReturn(false);
+
+        $this->expectException(IdempotencyPayloadMismatchException::class);
+
+        $this->makeService(idempotency: $idempotency)
+            ->createTransfer(1, 2, 999, null, 'raced-key');
     }
 
     public function testReleaseNotCalledWhenNoIdempotencyKey(): void

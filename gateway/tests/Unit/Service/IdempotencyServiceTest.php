@@ -5,19 +5,22 @@ declare(strict_types=1);
 namespace App\Tests\Unit\Service;
 
 use App\Infrastructure\RedisAdapterInterface;
+use App\Service\IdempotencyRecord;
 use App\Service\IdempotencyService;
 use PHPUnit\Framework\TestCase;
 
 class IdempotencyServiceTest extends TestCase
 {
-    public function testCheckReturnsTransferIdWhenKeyExists(): void
+    public function testCheckDecodesEnvelopeIntoRecord(): void
     {
         $redis = $this->createStub(RedisAdapterInterface::class);
-        $redis->method('get')->willReturn('transfer-uuid-123');
+        $redis->method('get')->willReturn('{"id":"transfer-uuid-123","fp":"abc"}');
 
-        $service = new IdempotencyService($redis);
+        $record = (new IdempotencyService($redis))->check('test-key');
 
-        $this->assertSame('transfer-uuid-123', $service->check('test-key'));
+        $this->assertInstanceOf(IdempotencyRecord::class, $record);
+        $this->assertSame('transfer-uuid-123', $record->transferId);
+        $this->assertSame('abc', $record->fingerprint);
     }
 
     public function testCheckReturnsNullWhenKeyDoesNotExist(): void
@@ -25,9 +28,30 @@ class IdempotencyServiceTest extends TestCase
         $redis = $this->createStub(RedisAdapterInterface::class);
         $redis->method('get')->willReturn(false);
 
-        $service = new IdempotencyService($redis);
+        $this->assertNull((new IdempotencyService($redis))->check('missing-key'));
+    }
 
-        $this->assertNull($service->check('missing-key'));
+    public function testCheckTreatsLegacyBareStringAsRecordWithNullFingerprint(): void
+    {
+        $redis = $this->createStub(RedisAdapterInterface::class);
+        $redis->method('get')->willReturn('legacy-uuid');
+
+        $record = (new IdempotencyService($redis))->check('legacy-key');
+
+        $this->assertNotNull($record);
+        $this->assertSame('legacy-uuid', $record->transferId);
+        $this->assertNull($record->fingerprint);
+    }
+
+    public function testCheckTreatsEnvelopeWithoutFingerprintAsNull(): void
+    {
+        $redis = $this->createStub(RedisAdapterInterface::class);
+        $redis->method('get')->willReturn('{"id":"transfer-uuid-123","fp":null}');
+
+        $record = (new IdempotencyService($redis))->check('test-key');
+
+        $this->assertSame('transfer-uuid-123', $record->transferId);
+        $this->assertNull($record->fingerprint);
     }
 
     public function testCheckPrefixesKeyWithNamespace(): void
@@ -41,15 +65,36 @@ class IdempotencyServiceTest extends TestCase
         (new IdempotencyService($redis))->check('abc');
     }
 
-    public function testReserveReturnsTrueWhenKeyNewlyReserved(): void
+    public function testReserveSerializesEnvelopeWithFingerprint(): void
     {
         $redis = $this->createMock(RedisAdapterInterface::class);
         $redis->expects($this->once())
             ->method('setNxEx')
-            ->with('idempotency:new-key', 'transfer-123', 86400)
+            ->with(
+                'idempotency:new-key',
+                '{"id":"transfer-123","fp":"fp-hash"}',
+                86400,
+            )
             ->willReturn(true);
 
-        $this->assertTrue((new IdempotencyService($redis))->reserve('new-key', 'transfer-123'));
+        $this->assertTrue(
+            (new IdempotencyService($redis))->reserve('new-key', 'transfer-123', 'fp-hash'),
+        );
+    }
+
+    public function testReserveDefaultsFingerprintToNull(): void
+    {
+        $redis = $this->createMock(RedisAdapterInterface::class);
+        $redis->expects($this->once())
+            ->method('setNxEx')
+            ->with(
+                'idempotency:new-key',
+                '{"id":"transfer-123","fp":null}',
+                86400,
+            )
+            ->willReturn(true);
+
+        (new IdempotencyService($redis))->reserve('new-key', 'transfer-123');
     }
 
     public function testReserveReturnsFalseWhenKeyAlreadyHeld(): void
@@ -57,7 +102,9 @@ class IdempotencyServiceTest extends TestCase
         $redis = $this->createStub(RedisAdapterInterface::class);
         $redis->method('setNxEx')->willReturn(false);
 
-        $this->assertFalse((new IdempotencyService($redis))->reserve('taken-key', 'transfer-456'));
+        $this->assertFalse(
+            (new IdempotencyService($redis))->reserve('taken-key', 'transfer-456', 'fp'),
+        );
     }
 
     public function testReserveUsesNamespacedKey(): void
@@ -68,7 +115,7 @@ class IdempotencyServiceTest extends TestCase
             ->with('idempotency:xyz', $this->isString(), 86400)
             ->willReturn(true);
 
-        (new IdempotencyService($redis))->reserve('xyz', 'some-id');
+        (new IdempotencyService($redis))->reserve('xyz', 'some-id', 'fp');
     }
 
     public function testReleaseCallsDelWithNamespacedKey(): void

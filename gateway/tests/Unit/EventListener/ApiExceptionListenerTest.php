@@ -6,6 +6,7 @@ namespace App\Tests\Unit\EventListener;
 
 use App\EventListener\ApiExceptionListener;
 use App\Exception\IdempotencyConflictException;
+use App\Exception\IdempotencyPayloadMismatchException;
 use App\Exception\InsufficientFundsException;
 use App\Exception\SameAccountTransferException;
 use PHPUnit\Framework\TestCase;
@@ -54,6 +55,16 @@ class ApiExceptionListenerTest extends TestCase
         $this->assertSame(Response::HTTP_CONFLICT, $response->getStatusCode());
         $payload = json_decode($response->getContent(), true);
         $this->assertSame('idempotency_conflict', $payload['code']);
+    }
+
+    public function testMapsIdempotencyPayloadMismatchTo409(): void
+    {
+        $response = $this->listener->buildResponse(new IdempotencyPayloadMismatchException());
+
+        $this->assertSame(Response::HTTP_CONFLICT, $response->getStatusCode());
+        $payload = json_decode($response->getContent(), true);
+        $this->assertSame('idempotency_payload_mismatch', $payload['code']);
+        $this->assertStringContainsString('different request body', $payload['error']);
     }
 
     public function testMapsHttpExceptionToCorrectStatus(): void

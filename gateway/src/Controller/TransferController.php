@@ -37,7 +37,18 @@ class TransferController
         ]),
     )]
     #[OA\Response(response: 400, description: 'Validation failed.')]
-    #[OA\Response(response: 409, description: 'Idempotency key conflict.')]
+    #[OA\Response(
+        response: 409,
+        description: 'Idempotency key conflict. `code=idempotency_conflict` indicates an in-flight reservation for the same key (retry shortly); `code=idempotency_payload_mismatch` indicates the key was previously used with a different request body (do not retry — fix the body).',
+        content: new OA\JsonContent(properties: [
+            new OA\Property(property: 'error', type: 'string'),
+            new OA\Property(
+                property: 'code',
+                type: 'string',
+                enum: ['idempotency_conflict', 'idempotency_payload_mismatch'],
+            ),
+        ]),
+    )]
     public function create(
         #[MapRequestPayload] CreateTransferRequest $payload,
         Request $request,

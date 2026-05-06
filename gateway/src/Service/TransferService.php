@@ -12,6 +12,7 @@ use App\Domain\Transfer\Transfer;
 use App\Domain\Transfer\TransferRepository;
 use App\Exception\AccountNotFoundException;
 use App\Exception\IdempotencyConflictException;
+use App\Exception\IdempotencyPayloadMismatchException;
 use App\Exception\InvalidTransferAmountException;
 use App\Exception\SameAccountTransferException;
 use App\Messenger\Message\ProcessTransferMessage;
@@ -54,8 +55,11 @@ class TransferService
             throw new InvalidTransferAmountException();
         }
 
+        $fingerprint = null;
         if ($idempotencyKey !== null) {
-            $existing = $this->lookupExistingTransfer($idempotencyKey);
+            $fingerprint = $this->fingerprintRequest($sourceAccountId, $destAccountId, $amountCents, $callbackUrl);
+
+            $existing = $this->lookupExistingTransfer($idempotencyKey, $fingerprint);
             if ($existing !== null) {
                 $this->logger->info('Idempotent request: returning existing transfer', [
                     'transfer_id' => $existing->getId(),
@@ -67,8 +71,8 @@ class TransferService
 
         $transferId = Uuid::v4()->toRfc4122();
 
-        if ($idempotencyKey !== null && !$this->idempotency->reserve($idempotencyKey, $transferId)) {
-            $existing = $this->lookupExistingTransfer($idempotencyKey);
+        if ($idempotencyKey !== null && !$this->idempotency->reserve($idempotencyKey, $transferId, $fingerprint)) {
+            $existing = $this->lookupExistingTransfer($idempotencyKey, $fingerprint);
             if ($existing !== null) {
                 return $existing;
             }
@@ -133,13 +137,34 @@ class TransferService
         return $this->accountRepository->find($id);
     }
 
-    private function lookupExistingTransfer(string $idempotencyKey): ?Transfer
+    /**
+     * Resolve the existing transfer for an idempotency key, validating that the
+     * caller's payload fingerprint matches the one originally stored. Returns null
+     * if the key is unused (or the stored transfer no longer exists). Throws
+     * IdempotencyPayloadMismatchException when the fingerprints disagree.
+     *
+     * Stored records that predate fingerprinting carry a null fingerprint and
+     * skip the comparison — see IdempotencyService::check() for the back-compat path.
+     */
+    private function lookupExistingTransfer(string $idempotencyKey, string $fingerprint): ?Transfer
     {
-        $existingId = $this->idempotency->check($idempotencyKey);
-        if ($existingId === null) {
+        $record = $this->idempotency->check($idempotencyKey);
+        if ($record === null) {
             return null;
         }
 
-        return $this->transferRepository->find($existingId);
+        if ($record->fingerprint !== null && !hash_equals($record->fingerprint, $fingerprint)) {
+            $this->logger->warning('Idempotency payload mismatch', [
+                'transfer_id' => $record->transferId,
+            ]);
+            throw new IdempotencyPayloadMismatchException();
+        }
+
+        return $this->transferRepository->find($record->transferId);
+    }
+
+    private function fingerprintRequest(int $sourceAccountId, int $destAccountId, int $amountCents, ?string $callbackUrl): string
+    {
+        return hash('sha256', $sourceAccountId . '|' . $destAccountId . '|' . $amountCents . '|' . ($callbackUrl ?? ''));
     }
 }

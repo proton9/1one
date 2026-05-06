@@ -216,15 +216,30 @@ class TransferApiTest extends WebTestCase
         $this->assertSame($first['data']['transfer_id'], $second['data']['transfer_id']);
     }
 
-    public function testSameIdempotencyKeyDifferentPayloadReturnsOriginal(): void
+    public function testSameIdempotencyKeyDifferentAmountReturns409PayloadMismatch(): void
     {
-        $key = 'idempotent-diff-' . uniqid();
+        $key = 'idempotent-diff-amount-' . uniqid();
 
         $first = $this->createTransfer(['amount' => 100], $key);
-        // Different amount, same key — should return the original transfer
+        $this->assertSame(Response::HTTP_ACCEPTED, $first['response']->getStatusCode());
+
         $second = $this->createTransfer(['amount' => 999], $key);
 
-        $this->assertSame($first['data']['transfer_id'], $second['data']['transfer_id']);
+        $this->assertSame(Response::HTTP_CONFLICT, $second['response']->getStatusCode());
+        $this->assertSame('idempotency_payload_mismatch', $second['data']['code']);
+    }
+
+    public function testSameIdempotencyKeyDifferentDestAccountReturns409PayloadMismatch(): void
+    {
+        $key = 'idempotent-diff-dest-' . uniqid();
+
+        $first = $this->createTransfer(['dest_account_id' => 2], $key);
+        $this->assertSame(Response::HTTP_ACCEPTED, $first['response']->getStatusCode());
+
+        $second = $this->createTransfer(['dest_account_id' => 3], $key);
+
+        $this->assertSame(Response::HTTP_CONFLICT, $second['response']->getStatusCode());
+        $this->assertSame('idempotency_payload_mismatch', $second['data']['code']);
     }
 
     // --- GET /accounts/{id}/balance ---
